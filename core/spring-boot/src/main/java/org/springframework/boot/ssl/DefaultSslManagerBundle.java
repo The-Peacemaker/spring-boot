@@ -18,11 +18,17 @@ package org.springframework.boot.ssl;
 
 import java.security.KeyStore;
 import java.security.NoSuchAlgorithmException;
+import java.security.cert.Certificate;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManagerFactory;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.log.LogMessage;
+import org.springframework.util.StringUtils;
 
 /**
  * Default implementation of {@link SslManagerBundle}.
@@ -31,6 +37,8 @@ import org.jspecify.annotations.Nullable;
  * @see SslManagerBundle#from(SslStoreBundle, SslBundleKey)
  */
 class DefaultSslManagerBundle implements SslManagerBundle {
+
+	private static final Log logger = LogFactory.getLog(DefaultSslManagerBundle.class);
 
 	private final SslStoreBundle storeBundle;
 
@@ -46,6 +54,7 @@ class DefaultSslManagerBundle implements SslManagerBundle {
 		try {
 			KeyStore store = this.storeBundle.getKeyStore();
 			this.key.assertContainsAlias(store);
+			logWarningIfKeyEntryIsSuspicious(store);
 			String alias = this.key.getAlias();
 			String algorithm = KeyManagerFactory.getDefaultAlgorithm();
 			KeyManagerFactory factory = getKeyManagerFactoryInstance(algorithm);
@@ -61,6 +70,51 @@ class DefaultSslManagerBundle implements SslManagerBundle {
 		catch (Exception ex) {
 			throw new IllegalStateException("Could not load key manager factory: " + ex.getMessage(), ex);
 		}
+	}
+
+	/**
+	 * Log a warning if the configured key alias does not resolve to a usable key
+	 * entry with a certificate chain. This check is best-effort only and never
+	 * throws: a validation failure must never break startup. It exists so that a
+	 * broken entry fails loudly in the logs rather than cryptically during the TLS
+	 * handshake. Only keystores backed by the SUN provider are checked since it is
+	 * the only provider known to silently drop certificates when loading a
+	 * passwordless PKCS12 store. Other providers are never checked so that no
+	 * false-positive warning can be logged for them.
+	 * @param store the keystore to check
+	 */
+	private void logWarningIfKeyEntryIsSuspicious(@Nullable KeyStore store) {
+		String alias = this.key.getAlias();
+		if (!StringUtils.hasLength(alias) || store == null || !isSunProvider(store)) {
+			return;
+		}
+		try {
+			if (!store.isKeyEntry(alias)) {
+				logger.warn(LogMessage.format(
+						"Keystore alias '%s' is not a key entry. TLS handshakes using this bundle may fail with errors such as 'SSL_ERROR_NO_CYPHER_OVERLAP'. If you are using a passwordless PKCS12 keystore, the JDK may have silently dropped the certificate entries when loading the store.",
+						alias));
+			}
+			else {
+				Certificate[] chain = store.getCertificateChain(alias);
+				if (chain == null || chain.length == 0) {
+					logger.warn(LogMessage.format(
+							"Keystore alias '%s' does not have an associated certificate chain. TLS handshakes using this bundle may fail with errors such as 'SSL_ERROR_NO_CYPHER_OVERLAP'. If you are using a passwordless PKCS12 keystore, the JDK may have silently dropped the certificates when loading the store.",
+							alias));
+				}
+			}
+		}
+		catch (Exception ex) {
+			logger.debug(LogMessage.format("Could not validate keystore alias '%s'", alias), ex);
+		}
+	}
+
+	/**
+	 * Whether the given keystore is backed by the SUN provider.
+	 * @param store the keystore to check
+	 * @return {@code true} if the SUN provider backs the keystore
+	 */
+	private static boolean isSunProvider(KeyStore store) {
+		return "SUN".equals(store.getProvider().getName());
 	}
 
 	@Override

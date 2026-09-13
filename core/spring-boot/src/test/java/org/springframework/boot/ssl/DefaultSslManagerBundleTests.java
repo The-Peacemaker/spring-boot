@@ -16,15 +16,25 @@
 
 package org.springframework.boot.ssl;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
+import java.security.Provider;
+import java.security.Security;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManagerFactory;
 
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+
+import org.springframework.boot.testsupport.system.CapturedOutput;
+import org.springframework.boot.testsupport.system.OutputCaptureExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
@@ -37,7 +47,33 @@ import static org.mockito.Mockito.mock;
  *
  * @author Phillip Webb
  */
+@ExtendWith(OutputCaptureExtension.class)
 class DefaultSslManagerBundleTests {
+
+	private static final String CERTIFICATE = """
+			-----BEGIN CERTIFICATE-----
+			MIIDqzCCApOgAwIBAgIIFMqbpqvipw0wDQYJKoZIhvcNAQELBQAwbDELMAkGA1UE
+			BhMCVVMxEzARBgNVBAgTCkNhbGlmb3JuaWExEjAQBgNVBAcTCVBhbG8gQWx0bzEP
+			MA0GA1UEChMGVk13YXJlMQ8wDQYDVQQLEwZTcHJpbmcxEjAQBgNVBAMTCWxvY2Fs
+			aG9zdDAgFw0yMzA1MDUxMTI2NThaGA8yMTIzMDQxMTExMjY1OFowbDELMAkGA1UE
+			BhMCVVMxEzARBgNVBAgTCkNhbGlmb3JuaWExEjAQBgNVBAcTCVBhbG8gQWx0bzEP
+			MA0GA1UEChMGVk13YXJlMQ8wDQYDVQQLEwZTcHJpbmcxEjAQBgNVBAMTCWxvY2Fs
+			aG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAPwHWxoE3xjRmNdD
+			+m+e/aFlr5wEGQUdWSDD613OB1w7kqO/audEp3c6HxDB3GPcEL0amJwXgY6CQMYu
+			sythuZX/EZSc2HdilTBu/5T+mbdWe5JkKThpiA0RYeucQfKuB7zv4ypioa4wiR4D
+			nPsZXjg95OF8pCzYEssv8wT49v+M3ohWUgfF0FPlMFCSo0YVTuzB1mhDlWKq/jhQ
+			11WpTmk/dQX+l6ts6bYIcJt4uItG+a68a4FutuSjZdTAE0f5SOYRBpGH96mjLwEP
+			fW8ZjzvKb9g4R2kiuoPxvCDs1Y/8V2yvKqLyn5Tx9x/DjFmOi0DRK/TgELvNceCb
+			UDJmhXMCAwEAAaNPME0wHQYDVR0OBBYEFMBIGU1nwix5RS3O5hGLLoMdR1+NMCwG
+			A1UdEQQlMCOCCWxvY2FsaG9zdIcQAAAAAAAAAAAAAAAAAAAAAYcEfwAAATANBgkq
+			hkiG9w0BAQsFAAOCAQEAhepfJgTFvqSccsT97XdAZfvB0noQx5NSynRV8NWmeOld
+			hHP6Fzj6xCxHSYvlUfmX8fVP9EOAuChgcbbuTIVJBu60rnDT21oOOnp8FvNonCV6
+			gJ89sCL7wZ77dw2RKIeUFjXXEV3QJhx2wCOVmLxnJspDoKFIEVjfLyiPXKxqe/6b
+			dG8zzWDZ6z+M2JNCtVoOGpljpHqMPCmbDktncv6H3dDTZ83bmLj1nbpOU587gAJ8
+			fl1PiUDyPRIl2cnOJd+wCHKsyym/FL7yzk0OSEZ81I92LpGd/0b2Ld3m/bpe+C4Z
+			ILzLXTnC6AhrLcDc9QN/EO+BiCL52n7EplNLtSn1LQ==
+			-----END CERTIFICATE-----
+			""".strip();
 
 	private final KeyManagerFactory keyManagerFactory = mock(KeyManagerFactory.class);
 
@@ -106,6 +142,94 @@ class DefaultSslManagerBundleTests {
 	}
 
 	@Test
+	void getKeyManagerFactoryWhenAliasIsNotKeyEntryLogsWarning(CapturedOutput output) throws Exception {
+		KeyStore keyStore = mock(KeyStore.class);
+		given(keyStore.containsAlias("alias")).willReturn(true);
+		given(keyStore.getProvider()).willReturn(Security.getProvider("SUN"));
+		given(keyStore.isKeyEntry("alias")).willReturn(false);
+		SslStoreBundle storeBundle = SslStoreBundle.of(keyStore, null, null);
+		DefaultSslManagerBundle bundle = new TestDefaultSslManagerBundle(storeBundle,
+				SslBundleKey.of("secret", "alias"));
+		assertThat(bundle.getKeyManagerFactory()).isSameAs(this.keyManagerFactory);
+		then(this.keyManagerFactory).should().init(keyStore, "secret".toCharArray());
+		assertThat(output).contains("Keystore alias 'alias' is not a key entry");
+	}
+
+	@Test
+	void getKeyManagerFactoryWhenAliasHasNoCertificateChainLogsWarning(CapturedOutput output) throws Exception {
+		KeyStore keyStore = mock(KeyStore.class);
+		given(keyStore.containsAlias("alias")).willReturn(true);
+		given(keyStore.getProvider()).willReturn(Security.getProvider("SUN"));
+		given(keyStore.isKeyEntry("alias")).willReturn(true);
+		given(keyStore.getCertificateChain("alias")).willReturn(null);
+		SslStoreBundle storeBundle = SslStoreBundle.of(keyStore, null, null);
+		DefaultSslManagerBundle bundle = new TestDefaultSslManagerBundle(storeBundle,
+				SslBundleKey.of("secret", "alias"));
+		assertThat(bundle.getKeyManagerFactory()).isSameAs(this.keyManagerFactory);
+		then(this.keyManagerFactory).should().init(keyStore, "secret".toCharArray());
+		assertThat(output).contains("Keystore alias 'alias' does not have an associated certificate chain");
+	}
+
+	@Test
+	void getKeyManagerFactoryWhenAliasIsTrustedCertificateEntryLogsWarning(CapturedOutput output) throws Exception {
+		KeyStore keyStore = KeyStore.getInstance("JKS");
+		keyStore.load(null, null);
+		keyStore.setCertificateEntry("alias", parseCertificate(CERTIFICATE));
+		SslStoreBundle storeBundle = SslStoreBundle.of(keyStore, null, null);
+		DefaultSslManagerBundle bundle = new TestDefaultSslManagerBundle(storeBundle,
+				SslBundleKey.of("secret", "alias"));
+		assertThat(bundle.getKeyManagerFactory()).isSameAs(this.keyManagerFactory);
+		then(this.keyManagerFactory).should().init(keyStore, "secret".toCharArray());
+		assertThat(output).contains("Keystore alias 'alias' is not a key entry");
+	}
+
+	@Test
+	void getKeyManagerFactoryWhenKeyStoreProviderIsNotSunLogsNoWarning(CapturedOutput output) throws Exception {
+		KeyStore keyStore = mock(KeyStore.class);
+		given(keyStore.containsAlias("alias")).willReturn(true);
+		given(keyStore.getProvider()).willReturn(new Provider("Test", "1.0", "Test provider") {
+		});
+		SslStoreBundle storeBundle = SslStoreBundle.of(keyStore, null, null);
+		DefaultSslManagerBundle bundle = new TestDefaultSslManagerBundle(storeBundle,
+				SslBundleKey.of("secret", "alias"));
+		assertThat(bundle.getKeyManagerFactory()).isSameAs(this.keyManagerFactory);
+		then(this.keyManagerFactory).should().init(keyStore, "secret".toCharArray());
+		assertThat(output).doesNotContain("is not a key entry");
+		assertThat(output).doesNotContain("certificate chain");
+	}
+
+	@Test
+	void getKeyManagerFactoryWhenAliasIsValidKeyEntryLogsNoWarning(CapturedOutput output) throws Exception {
+		KeyStore keyStore = mock(KeyStore.class);
+		given(keyStore.containsAlias("alias")).willReturn(true);
+		given(keyStore.getProvider()).willReturn(Security.getProvider("SUN"));
+		given(keyStore.isKeyEntry("alias")).willReturn(true);
+		given(keyStore.getCertificateChain("alias")).willReturn(new Certificate[] { mock(Certificate.class) });
+		SslStoreBundle storeBundle = SslStoreBundle.of(keyStore, null, null);
+		DefaultSslManagerBundle bundle = new TestDefaultSslManagerBundle(storeBundle,
+				SslBundleKey.of("secret", "alias"));
+		assertThat(bundle.getKeyManagerFactory()).isSameAs(this.keyManagerFactory);
+		then(this.keyManagerFactory).should().init(keyStore, "secret".toCharArray());
+		assertThat(output).doesNotContain("is not a key entry");
+		assertThat(output).doesNotContain("certificate chain");
+	}
+
+	@Test
+	void getKeyManagerFactoryWhenKeyEntryValidationFailsLogsNoWarning(CapturedOutput output) throws Exception {
+		KeyStore keyStore = mock(KeyStore.class);
+		given(keyStore.containsAlias("alias")).willReturn(true);
+		given(keyStore.getProvider()).willReturn(Security.getProvider("SUN"));
+		given(keyStore.isKeyEntry("alias")).willThrow(KeyStoreException.class);
+		SslStoreBundle storeBundle = SslStoreBundle.of(keyStore, null, null);
+		DefaultSslManagerBundle bundle = new TestDefaultSslManagerBundle(storeBundle,
+				SslBundleKey.of("secret", "alias"));
+		assertThat(bundle.getKeyManagerFactory()).isSameAs(this.keyManagerFactory);
+		then(this.keyManagerFactory).should().init(keyStore, "secret".toCharArray());
+		assertThat(output).doesNotContain("is not a key entry");
+		assertThat(output).doesNotContain("certificate chain");
+	}
+
+	@Test
 	void getKeyManagerFactoryWhenHasStore() throws Exception {
 		KeyStore keyStore = mock(KeyStore.class);
 		SslStoreBundle storeBundle = SslStoreBundle.of(keyStore, null, null);
@@ -131,6 +255,13 @@ class DefaultSslManagerBundleTests {
 		TrustManagerFactory result = bundle.getTrustManagerFactory();
 		assertThat(result).isSameAs(this.trustManagerFactory);
 		then(this.trustManagerFactory).should().init(trustStore);
+	}
+
+	private static Certificate parseCertificate(String content) throws Exception {
+		CertificateFactory factory = CertificateFactory.getInstance("X.509");
+		try (ByteArrayInputStream input = new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8))) {
+			return factory.generateCertificate(input);
+		}
 	}
 
 	/**
